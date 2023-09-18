@@ -1,0 +1,431 @@
+using namespace System.Collections
+using namespace System.Collections.Generic
+using namespace System.Management.Automation
+using namespace System.Management.Automation.Language
+
+Class DynamicParameterConfig {
+    [string]$Name
+    [type]$Type
+    [bool]$Mandatory
+
+    DynamicParameterConfig ($Name, $Type, $Mandatory) {
+        $this.Name = $Name
+        $this.Type = $Type
+        $this.Mandatory = $Mandatory
+    }
+}
+# Private
+Function Invoke-AVIRestParameters {
+    Param(
+        [Parameter(Mandatory = $false)]
+        $ContentType = 'application/json',
+        [Parameter(Mandatory = $false)]
+        $TimeOutSec = 180,
+        [Parameter(Mandatory = $false)]
+        $NoProxy = $true,
+        [Parameter(Mandatory = $false)]
+        $StatusCodeVariable = 'statusCode',
+        [Parameter(Mandatory = $false)]
+        $SkipHttpErrorCheck = $true,
+        [Parameter(Mandatory = $false)]
+        $SkipHeaderValidation = $true,
+        [Parameter(Mandatory = $false)]
+        $SkipCertificateCheck = $true,
+        [Parameter(Mandatory = $false)]
+        $HttpVersion = '2.0'
+    )
+    @{
+        ContentType = $ContentType
+        TimeoutSec = $TimeoutSec
+        NoProxy = $NoProxy
+        StatusCodeVariable = $StatusCodeVariable
+        SkipHttpErrorCheck = $SkipHttpErrorCheck
+        SkipHeaderValidation = $SkipHeaderValidation
+        SkipCertificateCheck = $SkipCertificateCheck
+        HttpVersion = $HttpVersion
+        ResponseHeadersVariable = 'responseHeader'
+    }
+}
+Function Get-AVIRestToken {
+    [CmdletBinding()]
+    Param (
+        [Parameter(
+            Mandatory=$true,
+            Position=0)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Server,
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
+        [hashtable]$Body,
+        [Parameter(Mandatory=$false)]
+        [string]$APIRev
+    )
+    Process {
+        $endpoint = '/login'
+        $uriRequest = [System.UriBuilder]::new("https",$Server,443,$endpoint)
+        $loginJSON = $Body | ConvertTo-Json -Compress
+        $loginSplat = @{
+            Method = 'POST'
+            URI = $uriRequest.URI
+            Body = $loginJSON
+            SessionVariable = 'session'
+        }
+        switch ($AVIStdParams.Keys) {  # need for reconnect
+            'URI' {$AVIStdParams.Remove('URI')}
+            'Body' {$AVIStdParams.Remove('Body')}
+        }
+        Write-Verbose "$($uriRequest.URI)"
+        $global:AVIReply = $null
+        $global:AVIReply = Invoke-RestMethod @loginSplat @AVIStdParams
+        if ($statusCode -eq 200) {
+            $global:AVIServer = $Server
+            $global:AVIRev = $APIRev
+            $setCookieList = $responseHeader.'Set-Cookie'
+            $cookie = $setCookieList[0]
+            foreach ($cookie in $setCookieList){
+                $splitCookie = $cookie -split '=|; ',5
+                $key = ${splitCookie}?[0]
+                switch ($key) {
+                    'csrftoken' {
+                        $session.Headers.'X-CSRFToken' = ${splitCookie}?[1]
+                    }
+                    default {
+                        $session.Headers.$key = ${splitCookie}?[1]
+                    }
+                }
+                $expkey = '{0}-{1}' -f $key,${splitCookie}?[2]
+                $session.Headers.$expkey = ${splitCookie}?[3]
+            }
+            $session.Headers.'x-avi-version' = $global:AVIReply.version.Version
+            $session.Headers.Referer = 'https://' + $global:AVIServer
+            $AVISessionParam.WebSession = $session
+        }
+        else {
+            Write-Warning "HTTP status [$statuscode]"
+        }
+        Write-Verbose "$AVIServer"
+        $global:AVIReply
+    }
+}
+Function Invoke-AVIRest {
+    [CmdletBinding()]
+    Param (
+        [Parameter(Mandatory=$true)]
+        [ValidateSet('GET','PUT','PATCH','POST','DELETE')]
+        $Method,
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$EndPoint,
+        [Parameter(Mandatory=$false)]
+        [ValidateNotNullOrEmpty()]
+        [ValidateScript({Test-JSON $_})]
+        [string]$Body,
+        [Parameter(Mandatory=$false)]
+        [ValidateNotNullOrEmpty()]
+        [hashtable]$Query,
+        [Parameter(Mandatory=$false)]
+        [ValidateNotNullOrEmpty()]
+        [string]$APIRev,
+        [Parameter(Mandatory=$false)]
+        [ValidateNotNullOrEmpty()]
+        [string]$OutputType
+    )
+    $ErrorActionPreference = 'Stop'
+    Try {
+        # Check connection
+        if ($null -eq $AVISessionParam.WebSession -or $null -eq $AVIServer) {
+            Return 'Not connected to AVI API'
+        }
+        $global:AVIStdParams = Invoke-AVIRestParameters
+
+        # Check expiration
+        if ((Get-Date).AddMinutes(+5) -ge [datetime]$AVISessionParam.WebSession.Headers.'sessionid-expires') {
+            $AVISessionParam.WebSession = Update-AVIRestToken
+        }
+
+        $allResults = [List[PSObject]]::New()
+        if ($Method -eq 'GET') {
+            $queryParam = $query ? $query.clone() : @{}
+            if ($null -ne $query.page_size -and $query.page_size -le 200) {
+                $queryParam.page_size = $query.page_size}
+            else {
+                $queryParam.page_size = 200
+                $queryParam.page = 1
+                $useTotal = $true
+            }
+        }
+        :pagination do {
+            $uriRequest = [System.UriBuilder]::new("https",$AVIServer,443,$endpoint)
+            if ($Method -eq 'GET' -and $null -eq $global:AVIReply.next) {
+                $queryString = [System.Web.HttpUtility]::ParseQueryString([String]::Empty)
+                foreach ($key in $queryParam.Keys) {$queryString.Add($key, $queryParam.$key)}
+                $uriRequest.Query = $queryString.ToString()
+            }
+            $AVIStdParams.URI = if ($null -ne $global:AVIReply.next) {$global:AVIReply.next}
+            else {$uriRequest.Uri}
+            Write-Verbose "Calling [$method] on URI: $($AVIStdParams.URI.OriginalString)"
+            If ($null -ne $body) {$AVIStdParams.Body = $body}
+            else {
+                if ($AVIStdParams.ContainsKey('Body')) {$AVIStdParams.Remove('Body')}
+            }
+
+            $global:AVIReply,$statusCode = $null
+            $global:AVIReply = Invoke-RestMethod -Method $Method @AVIStdParams @AVISessionParam
+            $global:AVIResponseHeader = $responseHeader
+            switch -Regex ($statusCode) {
+                '20[0-2]' {
+                    if ($global:AVIReply.GetType().Name -eq 'String' -and [string]::IsNullOrEmpty($global:AVIReply)) {
+                        break pagination
+                    }
+                    if ($null -ne $global:AVIReply.results) {
+                        $global:AVIReply.results | Foreach {$allResults.Add($_)}
+                    }
+                    else {
+                        $global:AVIReply | Foreach {$allResults.Add($_)}
+                    }
+                    if ($null -eq $global:AVIReply.next -or $global:AVIReply.count -eq 0) {break pagination} # some don't have any
+                    # Pagination
+                    # $queryParam.skip = $queryParam.skip + $queryParam.limit
+                    $paginationComplete = $useTotal ? $global:AVIReply.count : $allResults.count
+                    # continue pagination
+                }
+                204 {
+                    $global:AVIReply
+                    break pagination
+                }
+                Default {
+                    [PSCustomObject]@{
+                        HTTP_Response = [System.Net.HttpStatusCode]$statusCode
+                        API_ErrorMesg = $global:AVIReply
+                        HTTP_StatusCode = $statusCode
+                    }
+                    break pagination
+                }
+            }
+        }
+        until ($allResults.count -eq $paginationComplete)
+        if ($null -ne $PSBoundParameters.OutputType) {
+            $allResults | Foreach {$_.PSObject.TypeNames.Insert(0,$PSBoundParameters.OutputType)}
+        }
+        $allResults | Foreach {$_}
+    }
+    Catch {
+        $PSCmdlet.ThrowTerminatingError($PSItem)
+    }
+}
+Function Add-AVIRestParams ($splat, $Parameters, $ParameterSetName) {
+    switch -Wildcard ($ParameterSetName) {
+        # RESERVERED Parameterset Names - Should be filter by default to support paging (if needed)
+        'Body' {
+            $splat.Body = @{}
+            switch -Regex ($Parameters.Keys) {
+                'Ids' {$splat.Body.Add('ids',@($Parameters.Ids))}
+                'Name' {$splat.Body.Add('names',@($Parameters.Name))}
+                'Type' {$splat.Body.Add('types',@($Parameters.Type))}
+            }
+            $splat.Body =  $splat.Body | ConvertTo-JSON -Compress -Depth 3
+            Return
+        }
+        'Uuid' {
+            $queryParams = 'JoinResource|Fields|First|Skip|Created'
+            if ($Parameters.Keys -match $queryParams) {
+                $splat.Query  = @{}
+                switch -Regex ($Parameters.Keys) {
+                    'JoinResource' {$splat.Query.Add('join_subresources',$Parameters.JoinResource)}
+                    'Fields' {$splat.Query.Add('fields',$Parameters.Fields)}
+                    'First' {
+                        $splat.Query.Add('page',1)
+                        $splat.Query.Add('page_size',$Parameters.First)
+                    }
+                    'Skip' {$splat.Query.Add('skip',$Parameters.Skip)}
+                }
+            }
+            break
+        } 
+        'Query' {
+            $splat.Query  = $Parameters.Query
+            break
+        }
+        'Filter*' {
+            $queryParams = 'Uuid|Name|Fields|First|Skip|Created'
+            if ($Parameters.Keys -match $queryParams) {
+                $splat.Query  = @{}
+                switch -Regex ($Parameters.Keys) {
+                    # 'Uuid' {$splat.Query.Add('idFilter',$Parameters.Id)}
+                    'Name' {$splat.Query.Add('name',$Parameters.Name)}
+                    'Fields' {$splat.Query.Add('fields',$Parameters.Type)}
+                    'First' {
+                        $splat.Query.Add('page',1)
+                        $splat.Query.Add('page_size',$Parameters.First)
+                    }
+                    'Skip' {$splat.Query.Add('skip',$Parameters.Skip)}
+                    # 'CreatedAfter' {$splat.Query.Add('createdAfterFilter',$Parameters.CreatedAfter.ToString('r'))} # http datetime format
+                    # 'CreatedBefore' {$splat.Query.Add('createdBeforeFilter',$Parameters.CreatedBefore.ToString('r'))} # http datetime format
+                }
+            }
+            break
+        }
+    }
+}
+Function New-RuntimeDefinedParameter {
+    Param (
+        [Parameter(Mandatory=$true)]
+        [string[]]$ParameterSetName,
+        [Parameter(Mandatory=$true,
+            HelpMessage = 'Provide a hashtable where key is the dynamic parameter and value is the type')]
+        [DynamicParameterConfig]$DynamicParameterConfig,
+        [ValidateNotNullorEmpty()]
+        [Parameter(Mandatory=$false)]
+        [pscustomobject]$StringArgumentCompleter
+    )
+    $attributeCollectionMandatory = [ObjectModel.Collection[System.Attribute]]::new()
+    Foreach ($paramset in $ParameterSetName) {
+        $attributeCollectionMandatory.Add(
+            [ParameterAttribute]@{
+                ParameterSetName = $paramset
+                Mandatory = $ParamConfig.Mandatory
+            }
+        )
+        Switch ($PSBoundParameters.Keys) {
+            StringArgumentCompleter {
+                $attributeCollectionMandatory.Add([ArgumentCompletionsAttribute]::new($StringArgumentCompleter))
+            }
+        }
+    }
+    [RuntimeDefinedParameter]::new(
+        $ParamConfig.Name, $ParamConfig.Type, $attributeCollectionMandatory
+    )
+}
+Function Out-RuntimeDefinedParameterDict {
+    Param (
+        [Parameter(Mandatory=$true,ValueFromPipeline = $true)]
+        [RuntimeDefinedParameter[]]$RuntimeDef
+    )
+    Begin {
+        $paramDictionary = [RuntimeDefinedParameterDictionary]::new()
+    }
+    Process {
+        $RuntimeDef | Foreach {$paramDictionary.Add($_.Name, $_)}
+    }
+    End {
+        return $paramDictionary
+    }
+}
+Function Get-AVIFunctionTemplate ($method,$template,$jsonData) {
+    $title = $jsonData.info.title
+    $apiName = Get-ApiPathName $method.ApiPath
+    $apiPath = $method.ApiPath -replace '{uuid}','${uuid}'
+    $template -replace '\{0\}',$apiName -replace '\{1\}',$apiPath -replace '\{3\}',$apiVersion -replace '\{4\}',$title
+}
+Function Get-ApiPathName ($ApiPath) {
+    $pathSegments = $apiPath -split '^/|/|{uuid}|-|/$' | Where {-not [string]::IsNullOrEmpty($_)}
+    $segmentList = foreach ($segment in $pathSegments) {
+        $segment.Substring(0,1).ToUpper() +  $segment.Substring(1)
+    }
+    $segmentList -join ''
+}
+Function New-AVISwaggerJsonObj {
+    Param(
+        [switch]$MinRequired,
+        [hashtable]$Definitions,
+        [string]$Path,
+        [switch]$Nested
+    )
+    $PropertyDef = $Definitions.$Path.properties
+    $RequiredPropertyDef =  $Definitions.$Path.required
+    $propertyList = [ordered]@{}
+    if ($PSBoundParameters.minRequired.isPresent -and -not $PSBoundParameters.Nested.isPresent) {
+        foreach ($key in $PropertyDef.Keys) {
+            if ($RequiredPropertyDef -contains $key) {
+                $propertyList.Add($key,$PropertyDef.$key)
+            }
+        }
+    }
+    else {$propertyList = $PropertyDef}
+
+    $obj = [ordered]@{}
+    foreach ($key in $propertyList.Keys | Sort) {
+        $value = $propertyList.$key
+        if ($value.readOnly -eq $true) {continue}
+        if ($null -ne $value.type) {
+            switch ($value.type) {
+                string {
+                    [string]$obj.$key = $value.default ? $value.default : ''
+                }
+                boolean {
+                    [bool]$obj.$key = $value.default ? $value.default : $null
+                }
+                integer {
+                    [int]$obj.$key = $value.default ? $value.default : $null
+                }
+                array {
+                    $obj.$key = [List[object]]::New()
+                    if ($null -ne $value.items) {
+                        $ref,$nestedObj = $null
+                        $ref = $value.items.'$ref' -replace [regex]::Escape('#/definitions/')
+                        $nestedObj = New-AVISwaggerJsonObj -Definitions $Definitions -Path $ref -Nested
+                        $obj.$key.Add($nestedObj)
+                    }
+                }
+                default {
+                    
+                }
+            }
+        }
+        else {
+            $obj.$key = @{}
+            $ref,$nestedObj = $null
+            $ref = $value.'$ref' -replace [regex]::Escape('#/definitions/')
+            # $refPropertyDef = $Definitions.$ref.properties
+            # if ($PSBoundParameters.minRequired.isPresent) {
+            #     $nestedObj = New-AVISwaggerJsonObj -Definitions $Definitions -Path $ref -MinRequired -Nested
+            # }
+            # else {
+            #     $nestedObj = New-AVISwaggerJsonObj -Definitions $Definitions -Path $ref -Nested
+            # }
+            $nestedObj = New-AVISwaggerJsonObj -Definitions $Definitions -Path $ref -Nested
+            $obj.$key = $nestedObj
+        }
+    }
+    if ($PSBoundParameters.Nested.isPresent) {
+        [pscustomobject]$obj
+    }
+    else {
+        [pscustomobject]$obj | ConvertTo-JSON -Depth 100
+    }
+}
+Function New-AviRestFunctionExport ($method,$methodList,$templateFunction,$jsonData,$ExportList) {
+    # $method = $methodList[-1]
+    foreach ($methodObj in $methodList) {
+        # New
+        $resetFunctionTemplate = $templateFunction.psobject.Copy()
+        $functionTemplate = Get-AVIFunctionTemplate $methodObj $resetFunctionTemplate $jsonData
+        $functionTemplate
+        $apiName = Get-ApiPathName $method.ApiPath
+        $exportName = "$method-AVIRest$apiName"
+        $ExportList.Add($exportName)
+    }
+}
+Function New-AviRestFunctionParamExport ($methodList,$templateFunction,$jsonData,$ExportList) {
+    # $method = $methodList[-1]
+    foreach ($method in $methodList) {
+        # New Object
+        $apiName = Get-ApiPathName $method.ApiPath
+        $endpoint = $method.ApiPath -split '/',-2 | Select -Last 1
+        $endpoint = $endpoint -replace '-'
+        $definitionList = $jsonData.definitions
+        $endpointKey = $null
+        $endpointKey = Switch ($definitionList.keys) {
+            {$_ -match $endpoint} {$_}
+        }
+        if ($null -ne $endpointKey) {
+            $fullObj = New-AVISwaggerJsonObj -Definitions $definitionList -Path $endpointKey
+            $minObj = New-AVISwaggerJsonObj -Definitions $definitionList -Path $endpointKey -MinRequired
+            $resetTemplateFunction = $templateFunction.psobject.Copy()
+            $objectFunction = $resetTemplateFunction -replace '\{0\}',$apiName -replace '\{1\}',$minObj -replace '\{2\}',$fullObj -replace '\{3\}',$apiVersion -replace '\{4\}',$title
+            $exportName = "New-AVIRest{0}Object" -f $apiName
+            $ExportList.Add($exportName)
+            $objectFunction
+        }
+    }
+}
