@@ -3,11 +3,13 @@ using namespace System.Collections.Generic
 using namespace System.Management.Automation
 using namespace System.Management.Automation.Language
 
+Import-Module .\Private\AVIREST.Private.psm1 -Force
+Remove-Item AVIREST.psm1 -EA SilentlyContinue
 Get-Content -Raw .\Private\AVIRest.Private.psm1  | Out-File AVIREST.psm1 -Force
 Get-Content -Raw .\Public\AVIRest.Public.psm1  | Out-File AVIREST.psm1 -Append
 
 $dynamicExportList = [List[string]]::New()
-$exportFunctionList = [List[string]]::New()
+$exportFunctionList = [List[string[]]]::New()
 Try {
     # Templates
     $templateFunctionGET = Get-Content .\Templates\GET.pst1 -Raw -EA Stop
@@ -76,7 +78,7 @@ Try {
             $apiName = Get-ApiPathName $put.ApiPath
             $exportName = "Set-AVIRest$apiName"
             $dynamicExportList.Add($exportName)
-            $exportFunctionList.Add($functionGET)
+            $exportFunctionList.Add($functionTemplate)
         }
 
         ## POST
@@ -91,7 +93,7 @@ Try {
             $apiName = Get-ApiPathName $post.ApiPath
             $exportName = "New-AVIRest$apiName"
             $dynamicExportList.Add($exportName)
-            $exportFunctionList.Add($functionGET)
+            $exportFunctionList.Add($functionTemplate)
         }
         # $noIdpostFunctionList = New-AviRestFunctionExport New $noIdpostList $templateFunctionPOST $jsonData $dynamicExportList
         # Foreach ($noIdFunction in $noIdpostFunctionList) {
@@ -100,6 +102,7 @@ Try {
         $noIdpostFunctionParamList = New-AviRestFunctionParamExport $noIdpostList $templateObject $jsonData $dynamicExportList
         Foreach ($noIdFunctionParam in $noIdpostFunctionParamList ) {
             # Invoke-Expression -Command $noIdFunctionParam
+            $exportFunctionList.Add($noIdFunctionParam)
         }
 
         ### Id POSTs
@@ -112,7 +115,7 @@ Try {
             $apiName = Get-ApiPathName $post.ApiPath
             $exportName = "Invoke-AVIRest$apiName"
             $dynamicExportList.Add($exportName)
-            $exportFunctionList.Add($functionGET)
+            $exportFunctionList.Add($functionTemplate)
         }
         # $idpostFunctionList = New-AviRestFunctionExport Invoke $idpostList $templateFunctionPOSTuuid $jsonData $dynamicExportList
         # Foreach ($idFunction in $idpostFunctionList) {
@@ -121,6 +124,7 @@ Try {
         $idpostFunctionParamList = New-AviRestFunctionParamExport $idpostList $templateObject $jsonData $dynamicExportList
         Foreach ($idFunctionParam in $idpostFunctionParamList) {
             # Invoke-Expression -Command $idFunctionParam
+            $exportFunctionList.Add($idFunctionParam)
         }
 
         ## Delete
@@ -131,7 +135,7 @@ Try {
             $apiName = Get-ApiPathName $delete.ApiPath
             $exportName = "Remove-AVIRest$apiName"
             $dynamicExportList.Add($exportName)
-            $exportFunctionList.Add($functionGET)
+            $exportFunctionList.Add($functionTemplate)
         }
 
         # New Obj # this needs work to add body and body-less versions
@@ -155,8 +159,8 @@ Catch {
 }
 $exportFunctionList | Out-File AVIREST.psm1 -Append
 
-@'
 $staticExportList = 'Connect-AVIRest','Disconnect-AVIRest','Get-AVIRestRef','Copy-AVIRestObject'
-$exportList = $staticExportList + $dynamicExportList
-Export-ModuleMember $exportList 
-'@  | Out-File AVIREST.psm1 -Append
+[string]$exportList = ($staticExportList + $dynamicExportList) -join ','
+
+"Export-ModuleMember $exportList" | Out-File AVIREST.psm1 -Append
+Copy-Item .\AVIREST.psm1 ..\AVI-Rest-PowerShell -Force
