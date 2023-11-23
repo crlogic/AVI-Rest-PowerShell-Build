@@ -134,7 +134,7 @@ Function Invoke-AVIRest {
     Try {
         # Check connection
         if ($null -eq $AVISessionParam.WebSession -or $null -eq $AVIServer) {
-            Return 'Not connected to AVI API'
+            Throw 'You are not currently connected to any servers. Please connect first using a Connect cmdlet.'
         }
         $global:AVIStdParams = Invoke-AVIRestParameters
 
