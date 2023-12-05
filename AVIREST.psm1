@@ -3,6 +3,7 @@ using namespace System.Collections.Generic
 using namespace System.Management.Automation
 using namespace System.Management.Automation.Language
 
+[NoRunspaceAffinity()]
 Class DynamicParameterConfig {
     [string]$Name
     [type]$Type
@@ -134,7 +135,7 @@ Function Invoke-AVIRest {
     Try {
         # Check connection
         if ($null -eq $AVISessionParam.WebSession -or $null -eq $AVIServer) {
-            Return 'Not connected to AVI API'
+            Throw 'You are not currently connected to any servers. Please connect first using a Connect cmdlet.'
         }
         $global:AVIStdParams = Invoke-AVIRestParameters
 
@@ -496,7 +497,8 @@ Function Disconnect-AVIRest {
     $method = 'POST'
     Invoke-AVIRest -Method $method -Endpoint $endpoint -EA SilentlyContinue
     $global:AVISessionParam.WebSession = $null
-    $global:AVIServer = $null
+    $global:AVILbServerInfo = $null
+    $global:AVISessionParam = $null
 }
 Function Get-AVIRestRef {
     [CmdletBinding(

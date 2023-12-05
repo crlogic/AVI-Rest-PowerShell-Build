@@ -64,7 +64,8 @@ Function Disconnect-AVIRest {
     $method = 'POST'
     Invoke-AVIRest -Method $method -Endpoint $endpoint -EA SilentlyContinue
     $global:AVISessionParam.WebSession = $null
-    $global:AVIServer = $null
+    $global:AVILbServerInfo = $null
+    $global:AVISessionParam = $null
 }
 Function Get-AVIRestRef {
     [CmdletBinding(
